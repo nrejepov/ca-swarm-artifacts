@@ -17,7 +17,7 @@ MASTER_IP_PREFIX=$6
 
 # Update package lists and install prerequisites
 sudo apt-get update
-sudo apt-get install -y ca-certificates curl netcat
+sudo apt-get install -y ca-certificates curl netcat-openbsd
 
 # Add Docker's official GPG key
 sudo install -m 0755 -d /etc/apt/keyrings
