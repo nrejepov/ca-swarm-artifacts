@@ -60,7 +60,7 @@ if [[ $(hostname) == *"${MASTER_VM_PREFIX}"* ]]; then
   echo "sudo docker swarm join --token ${SWARM_JOIN_COMMAND} ${MASTER_PRIVATE_IP}:2377" > /tmp/join_command.sh
 
   # Start a simple listener to serve the join command to agents when they ask for it.
-  while true; do { echo -e 'HTTP/1.1 200 OK\r\n'; cat /tmp/join_command.sh; } | sudo nc -l 12345; done &
+  while true; do { echo -e 'HTTP/1.1 200 OK\r\n'; cat /tmp/join_command.sh; } | sudo nc -l -q 0 12345; done &
   
   echo "--- MASTER CONFIGURATION COMPLETE ---"
   echo "Swarm is initialized. Now serving join token to agents."
