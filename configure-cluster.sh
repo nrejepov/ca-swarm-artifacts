@@ -60,7 +60,6 @@ if [[ $(hostname) == *"${MASTER_VM_PREFIX}"* ]]; then
   echo "sudo docker swarm join --token ${SWARM_JOIN_COMMAND} ${MASTER_PRIVATE_IP}:2377" > /tmp/join_command.sh
 
   # Start a simple listener to serve the join command to agents when they ask for it.
-  # This will run in the background.
   while true; do { echo -e 'HTTP/1.1 200 OK\r\n'; cat /tmp/join_command.sh; } | sudo nc -l 12345; done &
   
   echo "--- MASTER CONFIGURATION COMPLETE ---"
@@ -68,20 +67,13 @@ if [[ $(hostname) == *"${MASTER_VM_PREFIX}"* ]]; then
   
 else
 
-  # --- AGENT NODE ACTIONS ---
+  # --- AGENT NODE ACTIONS (UPDATED) ---
   echo "This is an AGENT node. Waiting for master to become ready..."
   
-  # Loop until it can successfully connect to the master's listener port
-  while ! nc -z ${MASTER_PRIVATE_IP} 12345; do   
-    sleep 5
-    echo "Retrying to connect to master..."
-  done
+  # Will try 12 times, waiting 10 seconds between each attempt.
+  curl --retry 12 --retry-delay 10 --retry-connrefused "http://${MASTER_PRIVATE_IP}:12345" -o /tmp/join_swarm.sh
   
-  echo "Master is ready. Fetching join command."
-  # Download the join command script from the master
-  curl http://${MASTER_PRIVATE_IP}:12345 -o /tmp/join_swarm.sh
-  
-  echo "Executing join command..."
+  echo "Master is ready. Executing join command..."
   # Make the script executable and run it
   sudo chmod +x /tmp/join_swarm.sh
   sudo bash /tmp/join_swarm.sh
