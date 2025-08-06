@@ -6,7 +6,7 @@ set -e
 set -x
 
 # Script parameter
-AZURE_USER=$1
+AZURE_USER=$4
 
 # --- Function to retry a command ---
 retry() {
