@@ -1,91 +1,284 @@
 #!/bin/bash
 
-# Exit immediately if a command exits with a non-zero status.
-set -e
-# Print each command to the console before executing it.
+###########################################################
+# Configure Swarm Mode One Box
+#
+# This installs the following components
+# - Docker
+# - Docker Compose
+# - Swarm Mode masters
+# - Swarm Mode agents
+###########################################################
+
 set -x
 
-# Script parameter
-AZURE_USER=$4
+echo "starting Swarm Mode cluster configuration"
+date
+ps ax
 
-# --- Function to retry a command ---
-retry() {
-    local -r -i max_attempts=5
-    local -r -i sleep_time=3
-    local -i attempt_num=1
-    local command="$@"
+DOCKER_COMPOSE_VERSION="1.12.0"
+#############
+# Parameters
+#############
 
-    until $command; do
-        if ((attempt_num++ >= max_attempts)); then
-            echo "Command failed after ${max_attempts} attempts: ${command}"
-            return 1
-        fi
-        echo "Command failed. Retrying in ${sleep_time}s..."
-        sleep $sleep_time
-    done
+MASTERCOUNT=${1}
+MASTERPREFIX=${2}
+MASTERFIRSTADDR=${3}
+AZUREUSER=${4}
+POSTINSTALLSCRIPTURI=${5}
+BASESUBNET=${6}
+VMNAME=`hostname`
+VMNUMBER=`echo $VMNAME | sed 's/.*[^0-9]\([0-9]\+\)*$/\1/'`
+VMPREFIX=`echo $VMNAME | sed 's/\(.*[^0-9]\)*[0-9]\+$/\1/'`
+
+echo "Master Count: $MASTERCOUNT"
+echo "Master Prefix: $MASTERPREFIX"
+echo "Master First Addr: $MASTERFIRSTADDR"
+echo "vmname: $VMNAME"
+echo "VMNUMBER: $VMNUMBER, VMPREFIX: $VMPREFIX"
+echo "BASESUBNET: $BASESUBNET"
+echo "AZUREUSER: $AZUREUSER"
+
+###################
+# Common Functions
+###################
+
+ensureAzureNetwork()
+{
+  # ensure the network works
+  networkHealthy=1
+  for i in {1..12}; do
+    wget -O/dev/null http://bing.com
+    if [ $? -eq 0 ]
+    then
+      # hostname has been found continue
+      networkHealthy=0
+      echo "the network is healthy"
+      break
+    fi
+    sleep 10
+  done
+  if [ $networkHealthy -ne 0 ]
+  then
+    echo "the network is not healthy, aborting install"
+    ifconfig
+    ip a
+    exit 2
+  fi
+  # ensure the host ip can resolve
+  networkHealthy=1
+  for i in {1..120}; do
+    hostname -i
+    if [ $? -eq 0 ]
+    then
+      # hostname has been found continue
+      networkHealthy=0
+      echo "the network is healthy"
+      break
+    fi
+    sleep 1
+  done
+  if [ $networkHealthy -ne 0 ]
+  then
+    echo "the network is not healthy, cannot resolve ip address, aborting install"
+    ifconfig
+    ip a
+    exit 2
+  fi
 }
+ensureAzureNetwork
+HOSTADDR=`hostname -i`
 
-# --- 1. System Setup & Docker Installation ---
-
-echo "Starting system setup and Docker installation..."
-
-# Use retry for commands that access the network
-retry sudo apt-get update
-retry sudo apt-get install -y ca-certificates curl
-
-# Add Docker's official GPG key
-sudo install -m 0755 -d /etc/apt/keyrings
-retry sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-sudo chmod a+r /etc/apt/keyrings/docker.asc
-
-# Add the Docker repository to Apt sources
-OS_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-  ${OS_CODENAME} stable" | \
-  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-# Update package list again with the new repo
-retry sudo apt-get update
-
-# --- MODIFICATION START ---
-
-# Define the specific Docker version string required for UCP 3.3
-# This must match the OS version (e.g., 'focal' for 20.04, 'bionic' for 18.04)
-case "${OS_CODENAME}" in
-  "focal") # Ubuntu 20.04
-    DOCKER_VERSION_STRING="5:19.03.15~3-0~ubuntu-focal"
-    ;;
-  "bionic") # Ubuntu 18.04
-    DOCKER_VERSION_STRING="5:19.03.15~3-0~ubuntu-bionic"
-    ;;
-  *)
-    echo "ERROR: This script requires Ubuntu 20.04 (focal) or 18.04 (bionic)."
-    exit 1
-    ;;
-esac
-
-echo "Attempting to install Docker version: ${DOCKER_VERSION_STRING}"
-
-# Install the specific version of Docker Engine and containerd.io
-# The buildx and compose plugins are removed as they are not compatible with this older version.
-retry sudo apt-get install -y \
-  docker-ce=${DOCKER_VERSION_STRING} \
-  docker-ce-cli=${DOCKER_VERSION_STRING} \
-  containerd.io
-
-# Hold the packages to prevent them from being accidentally upgraded
-sudo apt-mark hold docker-ce docker-ce-cli
-
-# --- MODIFICATION END ---
-
-# Add the student user to the 'docker' group
-if id -u "${AZURE_USER}" >/dev/null 2>&1; then
-    sudo usermod -aG docker ${AZURE_USER}
-    echo "User '${AZURE_USER}' has been added to the docker group."
-else
-    echo "Warning: User '${AZURE_USER}' was not found. Skipping adding user to the docker group."
+ismaster ()
+{
+  if [ "$MASTERPREFIX" == "$VMPREFIX" ]
+  then
+    return 0
+  else
+    return 1
+  fi
+}
+if ismaster ; then
+  echo "this node is a master"
 fi
 
-echo "--- INSTALLATION COMPLETE ---"
-echo "Docker version 19.03.15 is now installed and ready to use."
+isagent()
+{
+  if ismaster ; then
+    return 1
+  else
+    return 0
+  fi
+}
+if isagent ; then
+  echo "this node is an agent"
+fi
+
+MASTER0IPADDR="${BASESUBNET}${MASTERFIRSTADDR}"
+
+######################
+# resolve self in DNS
+######################
+
+echo "$HOSTADDR $VMNAME" | sudo tee -a /etc/hosts
+
+################
+# Install Docker
+################
+
+echo "Installing and configuring Docker"
+
+installDocker()
+{
+  for i in {1..10}; do
+    wget --tries 4 --retry-connrefused --waitretry=15 -qO- https://get.docker.com | sh
+    if [ $? -eq 0 ]
+    then
+      # hostname has been found continue
+      echo "Docker installed successfully"
+      break
+    fi
+    sleep 10
+  done
+}
+time installDocker
+
+sudo usermod -aG docker $AZUREUSER
+
+echo "Updating Docker daemon options"
+
+updateDockerDaemonOptions()
+{
+    sudo mkdir -p /etc/systemd/system/docker.service.d
+    # Start Docker and listen on :2375 (no auth, but in vnet) and
+    # also have it bind to the unix socket at /var/run/docker.sock
+    sudo bash -c 'echo "[Service]
+    ExecStart=
+    ExecStart=/usr/bin/dockerd -H tcp://0.0.0.0:2375 -H unix:///var/run/docker.sock
+  " > /etc/systemd/system/docker.service.d/override.conf'
+}
+time updateDockerDaemonOptions
+
+echo "Installing Docker Compose"
+installDockerCompose()
+{
+  # sudo -i
+
+  for i in {1..10}; do
+    wget --tries 4 --retry-connrefused --waitretry=15 -qO- https://github.com/docker/compose/releases/download/$DOCKER_COMPOSE_VERSION/docker-compose-`uname -s`-`uname -m` > /usr/local/bin/docker-compose
+    if [ $? -eq 0 ]
+    then
+      # hostname has been found continue
+      echo "docker-compose installed successfully"
+      break
+    fi
+    sleep 10
+  done
+}
+time installDockerCompose
+chmod +x /usr/local/bin/docker-compose
+
+sudo systemctl daemon-reload
+sudo service docker restart
+
+ensureDocker()
+{
+  # ensure that docker is healthy
+  dockerHealthy=1
+  for i in {1..3}; do
+    sudo docker info
+    if [ $? -eq 0 ]
+    then
+      # hostname has been found continue
+      dockerHealthy=0
+      echo "Docker is healthy"
+      sudo docker ps -a
+      break
+    fi
+    sleep 10
+  done
+  if [ $dockerHealthy -ne 0 ]
+  then
+    echo "Docker is not healthy"
+  fi
+}
+ensureDocker
+
+##############################################
+# configure init rules restart all processes
+##############################################
+
+#if ismaster ; then
+#    if [ "$HOSTADDR" = "$MASTER0IPADDR" ]; then
+#          echo "Creating a new Swarm on first master"
+#          docker swarm init --advertise-addr $(hostname -i):2377 --listen-addr $(hostname -i):2377
+#    else
+#        echo "Secondary master attempting to join an existing Swarm"
+#        swarmmodetoken=""
+#        swarmmodetokenAcquired=1
+#        for i in {1..120}; do
+#            swarmmodetoken=$(docker -H $MASTER0IPADDR:2375 swarm join-token -q manager)
+#            if [ $? -eq 0 ]; then
+#                swarmmodetokenAcquired=0
+#                break
+#            fi
+#            sleep 5
+#        done
+#        if [ $swarmmodetokenAcquired -ne 0 ]
+#        then
+#            echo "Secondary master couldn't connect to Swarm, aborting install"
+#            exit 2
+#        fi
+#        docker swarm join --token $swarmmodetoken $MASTER0IPADDR:2377
+#    fi
+#fi
+
+if ismaster ; then
+  echo "Having ssh listen to port 2222 as well as 22"
+  sudo sed  -i "s/^Port 22$/Port 22
+Port 2222/1" /etc/ssh/sshd_config
+fi
+
+#if ismaster ; then
+#  echo "Setting availability of master node: '$VMNAME' to pause"
+#  docker node update --availability pause $VMNAME
+#fi
+#
+#if isagent ; then
+#    echo "Agent attempting to join an existing Swarm"
+#    swarmmodetoken=""
+#    swarmmodetokenAcquired=1
+#    for i in {1..120}; do
+#        swarmmodetoken=$(docker -H $MASTER0IPADDR:2375 swarm join-token -q worker)
+#        if [ $? -eq 0 ]; then
+#            swarmmodetokenAcquired=0
+#            break
+#        fi
+#        sleep 5
+#    done
+#    if [ $swarmmodetokenAcquired -ne 0 ]
+#    then
+#        echo "Agent couldn't join Swarm, aborting install"
+#        exit 2
+#    fi
+#    docker swarm join --token $swarmmodetoken $MASTER0IPADDR:2377
+#fi
+
+if [ $POSTINSTALLSCRIPTURI != "disabled" ]
+then
+  echo "downloading, and kicking off post install script"
+  /bin/bash -c "wget --tries 20 --retry-connrefused --waitretry=15 -qO- $POSTINSTALLSCRIPTURI | nohup /bin/bash >> /var/log/azure/cluster-bootstrap-postinstall.log 2>&1 &"
+fi
+
+echo "processes at end of script"
+ps ax
+date
+echo "completed Swarm Mode cluster configuration"
+
+#echo "restart system to install any remaining software"
+#if isagent ; then
+#  shutdown -r now
+#else
+#  # wait 1 minute to restart master
+#  /bin/bash -c "shutdown -r 1 &"
+#fi
