@@ -54,3 +54,5 @@ if [[ $(hostname) == *"${MASTER_VM_PREFIX}"* ]]; then
   sudo docker swarm init --advertise-addr ${MASTER_PRIVATE_IP}
   
   echo "--- MASTER CONFIGURATION COMPLETE ---"
+
+fi
