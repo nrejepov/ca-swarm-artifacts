@@ -55,4 +55,8 @@ if [[ $(hostname) == *"${MASTER_VM_PREFIX}"* ]]; then
   
   echo "--- MASTER CONFIGURATION COMPLETE ---"
 
+else
+
+  echo "--- AGENT CONFIGURATION COMPLETE ---"
+
 fi
